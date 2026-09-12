@@ -1190,10 +1190,10 @@ struct FolderCardView: View {
         .padding(.horizontal, 16)
         .frame(height: 56)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.selection))
+        .background(Rectangle().fill(Theme.selection))
         .scaleEffect(isTargeted ? 1.08 : 1)
         .animation(.spring(response: 0.18, dampingFraction: 0.75), value: isTargeted)
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(Rectangle())
         .onTapGesture {
             if !isEditing {
                 onOpen()
@@ -1258,7 +1258,8 @@ struct NewFolderCardView: View {
             .padding(.horizontal, 16)
             .frame(height: 56)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.selection))
+            .background(Rectangle().fill(Theme.selection))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

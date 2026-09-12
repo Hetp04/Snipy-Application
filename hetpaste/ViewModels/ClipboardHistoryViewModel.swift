@@ -536,6 +536,14 @@ final class ClipboardHistoryViewModel: ObservableObject {
             if uploadItem.localData == nil, let cached = AssetCache.shared.data(for: item.id) {
                 uploadItem.localData = cached
             }
+            // Folders are presented and restored as Finder folders, but iCloud
+            // requires a byte payload. Older folder cards predate the hidden
+            // archive payload added during capture, so create it on Retry too.
+            if uploadItem.mimeType == "inode/directory",
+               uploadItem.localData == nil,
+               let folderURL = uploadItem.revealableFileURL ?? uploadItem.originalFileURL {
+                uploadItem.localData = folderArchiveData(for: folderURL)
+            }
             let saved = try await repository.save(uploadItem)
             updateItem(id: item.id, touchModifiedAt: false) {
                 $0.syncStatus = .synced
@@ -556,6 +564,29 @@ final class ClipboardHistoryViewModel: ObservableObject {
             handleCloudFailure(error)
             print("❌ Clipboard iCloud save error: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    private func folderArchiveData(for directory: URL) -> Data? {
+        let didStartAccessing = directory.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing { directory.stopAccessingSecurityScopedResource() }
+        }
+        let archive = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hetpaste-folder-retry-\(UUID().uuidString)")
+            .appendingPathExtension("zip")
+        defer { try? FileManager.default.removeItem(at: archive) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", directory.path, archive.path]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            return try? Data(contentsOf: archive)
+        } catch {
+            return nil
         }
     }
 

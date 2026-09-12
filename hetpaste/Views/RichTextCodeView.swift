@@ -35,7 +35,9 @@ struct RichTextCodeView: View {
                 } else if let html = currentItem.htmlData {
                     nsAttr = try? NSAttributedString(data: html, options: [.documentType: NSAttributedString.DocumentType.html], documentAttributes: nil)
                 }
-                
+
+                // Plain-text code has no source presentation to preserve, so
+                // give it a small, readable syntax-highlighted fallback.
                 if nsAttr == nil, let language = currentItem.detectedLanguage {
                     nsAttr = await MainActor.run {
                         CodeSyntaxHighlighter.highlightedText(
@@ -51,21 +53,9 @@ struct RichTextCodeView: View {
                 
                 let hasPortableRichText = currentItem.rtfData != nil || currentItem.htmlData != nil || currentItem.rtfdData != nil
                 if currentItem.contentType == .richText || hasPortableRichText {
-                    // RTF, HTML and RTFD are portable authored formatting.
-                    // Never run them through the code/plain-text normalizer:
-                    // it is allowed to improve syntax readability but must not
-                    // change underline, strike-through, links, paragraph
-                    // styles, colors, attachments, or other rich attributes.
-                    if currentItem.detectedLanguage != nil {
-                        let presentation = NSMutableAttributedString(attributedString: validNSAttr)
-                        let range = NSRange(location: 0, length: presentation.length)
-                        presentation.removeAttribute(.backgroundColor, range: range)
-                        presentation.enumerateAttribute(.foregroundColor, in: range) { value, subrange, _ in
-                            guard let color = value as? NSColor, Self.isTooLightForLightSurface(color) else { return }
-                            presentation.addAttribute(.foregroundColor, value: NSColor.labelColor, range: subrange)
-                        }
-                        return try? AttributedString(presentation, including: \.appKit)
-                    }
+                    // RTF, HTML and RTFD are portable authored formatting,
+                    // including syntax colours and code-block backgrounds.
+                    // Render them without changing any source attributes.
                     return try? AttributedString(validNSAttr, including: \.appKit)
                 }
                 
@@ -96,11 +86,6 @@ struct RichTextCodeView: View {
             
             self.attributedText = newAttr
         }
-    }
-
-    private static func isTooLightForLightSurface(_ color: NSColor) -> Bool {
-        guard let value = color.usingColorSpace(.sRGB) else { return false }
-        return (value.redComponent * 0.2126) + (value.greenComponent * 0.7152) + (value.blueComponent * 0.0722) > 0.82
     }
 
     private static func readableCodeColor(_ color: NSColor, fallback: NSColor) -> NSColor {

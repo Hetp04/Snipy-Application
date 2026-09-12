@@ -355,18 +355,14 @@ struct WardrobeItemCard: View {
         }
         .frame(maxWidth: .infinity)
         .background(Theme.neoBase)
-        .clipShape(RoundedRectangle(cornerRadius: 24))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24)
-                .stroke(isSelected ? Theme.accent : Color(hex: "#E5E5E5"), lineWidth: isSelected ? 2.5 : 1)
-        )
+        .clipShape(Rectangle())
         .softOuterShadow(
             darkShadow: Color(hex: "#A3B1C6").opacity(0.35),
             lightShadow: Color.white,
             offset: 6,
             radius: 8
         )
-        .contentShape(RoundedRectangle(cornerRadius: 24))
+        .contentShape(Rectangle())
         .onTapGesture {
             onPrimaryTap()
         }

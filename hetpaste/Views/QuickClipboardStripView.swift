@@ -518,7 +518,7 @@ struct QuickClipboardStripView: View {
                     // NSDragging renders the preview into its layout bounds;
                     // preserve the row's own 24pt outer-card silhouette rather
                     // than letting that snapshot become a rectangle.
-                    .clipShape(RoundedRectangle(cornerRadius: 24))
+                    .clipShape(Rectangle())
             }
             .onAppear {
                 if item.contentType == .image || item.contentType == .file || item.contentType == .video {

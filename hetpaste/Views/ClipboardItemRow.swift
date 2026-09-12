@@ -443,12 +443,8 @@ struct ClipboardItemRow: View {
         .background(Theme.neoBase)
         // One shared outer silhouette for cards everywhere: main grid, strip,
         // previews, and Trash. Internal media remains clipped by its own shape.
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(isSelected ? Theme.accent : Color.black.opacity(0.09), lineWidth: isSelected ? 1.5 : 1)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .clipShape(Rectangle())
+        .contentShape(Rectangle())
         // Double-tap MUST come before single-tap so SwiftUI waits for a possible 2nd tap
         .onTapGesture(count: 2) {
             if let onDoubleTap {
@@ -536,12 +532,27 @@ struct ClipboardItemRow: View {
             path.contains("/episode/") ||
             path.contains("/book/")
     }
+    private var isMapItem: Bool {
+        item.sourceAppName.caseInsensitiveCompare("Maps") == .orderedSame ||
+            item.sourceAppBundleID?.lowercased() == "com.apple.maps"
+    }
+    private var isBrowserSource: Bool {
+        // This is intentionally a source-app classification, not a list of
+        // website or media domains. Every native app can keep its own richer
+        // link preview without special-casing News, Podcasts, Music, etc.
+        let browserBundleIDs: Set<String> = [
+            "com.apple.safari", "com.google.chrome", "org.mozilla.firefox",
+            "com.microsoft.edgemac", "com.brave.browser", "company.thebrowser.browser",
+            "com.operasoftware.opera", "com.vivaldi.vivaldi"
+        ]
+        return item.sourceAppBundleID.map { browserBundleIDs.contains($0.lowercased()) } ?? false
+    }
     @ViewBuilder
     private var pasteContent: some View {
         Group {
-            if item.contentType == .url {
-                // All URL links render directly on the card background
-                // — no inner rounded container. LinkCardPreview owns its own layout.
+            if item.contentType == .url && !isMapItem {
+                // Ordinary links render directly on the card background.
+                // Maps use the image-style preview panel below.
                 pasteURLPreview
                     .frame(height: isExpanded ? nil : 92)
             } else {
@@ -690,7 +701,13 @@ struct ClipboardItemRow: View {
     @ViewBuilder
     private var pasteURLPreview: some View {
         if let text = item.contentText, let url = URL(string: text), let host = url.host {
-            LinkCardPreview(url: url, host: host, accentColor: pasteHeaderColor)
+            LinkCardPreview(
+                url: url,
+                host: host,
+                accentColor: pasteHeaderColor,
+                forceMapLayout: isMapItem,
+                usesNativePreview: !isBrowserSource
+            )
         } else {
             Text(item.contentText ?? "")
                 .font(.system(size: 13, weight: .medium))
@@ -890,8 +907,15 @@ struct ClipboardItemRow: View {
             let name = item.fileName ?? item.contentText ?? "File"
             let rawExt = URL(fileURLWithPath: name).pathExtension
             let extUpper = rawExt.uppercased()
-            let badge = extUpper.isEmpty ? "FILE" : extUpper
-            MiniFileMockup(name: name, size: Formatters.fileSize(item.fileSize), badge: badge, fileTypeExt: rawExt.lowercased(), fileURL: resolvedFileURL ?? item.originalFileURL)
+            let isFolder = item.mimeType == "inode/directory"
+            let badge = isFolder ? "FOLDER" : (extUpper.isEmpty ? "FILE" : extUpper)
+            MiniFileMockup(
+                name: name,
+                size: isFolder ? "" : Formatters.fileSize(item.fileSize),
+                badge: badge,
+                fileTypeExt: rawExt.lowercased(),
+                fileURL: resolvedFileURL ?? item.originalFileURL
+            )
         } else if item.contentType == .url {
             HStack(alignment: .top, spacing: 6) {
                 if let t = item.contentText, let u = URL(string: t), let host = u.host {
@@ -1130,6 +1154,8 @@ private struct LinkCardPreview: View {
     let url: URL
     let host: String
     let accentColor: Color
+    let forceMapLayout: Bool
+    let usesNativePreview: Bool
     @State private var title: String?
     @State private var image: NSImage?
     @State private var iconImage: NSImage?
@@ -1137,10 +1163,18 @@ private struct LinkCardPreview: View {
     @State private var faviconImage: NSImage?
     @State private var didRequestMetadata: Bool
 
-    init(url: URL, host: String, accentColor: Color) {
+    init(
+        url: URL,
+        host: String,
+        accentColor: Color,
+        forceMapLayout: Bool = false,
+        usesNativePreview: Bool = false
+    ) {
         self.url = url
         self.host = host
         self.accentColor = accentColor
+        self.forceMapLayout = forceMapLayout
+        self.usesNativePreview = usesNativePreview
         let cached = LinkPreviewCache.shared.cachedMetadata(for: url)
         _title = State(initialValue: cached?.title)
         _openGraphImage = State(initialValue: cached?.image)
@@ -1150,36 +1184,6 @@ private struct LinkCardPreview: View {
     }
     private var displayHost: String {
         host.replacingOccurrences(of: "www.", with: "")
-    }
-    private var isCoverMediaLink: Bool {
-        let lower = host.lowercased()
-        let path = url.path.lowercased()
-        return lower.contains("music.apple.com") ||
-            lower.contains("itunes.apple.com") ||
-            lower.contains("podcasts.apple.com") ||
-            lower.contains("spotify.com") ||
-            lower.contains("soundcloud.com") ||
-            lower.contains("tidal.com") ||
-            lower.contains("bandcamp.com") ||
-            lower.contains("books.apple.com") ||
-            lower.contains("audible.com") ||
-            lower.contains("youtube.com") ||
-            lower.contains("youtu.be") ||
-            lower.contains("vimeo.com") ||
-            path.contains("/album/") ||
-            path.contains("/track/") ||
-            path.contains("/playlist/") ||
-            path.contains("/podcast/") ||
-            path.contains("/episode/") ||
-            path.contains("/book/")
-    }
-    private var isVideoMediaLink: Bool {
-        let lower = host.lowercased()
-        return lower.contains("youtube.com") ||
-            lower.contains("youtu.be") ||
-            lower.contains("vimeo.com") ||
-            lower.contains("netflix.com") ||
-            lower.contains("tv.apple.com")
     }
     private var visualImage: NSImage? {
         if let openGraphImage { return openGraphImage }
@@ -1194,11 +1198,16 @@ private struct LinkCardPreview: View {
     }
     var body: some View {
         Group {
-            if let artwork = visualImage {
-                // Any link with a preview image gets the hero layout — media, websites, all
-                linkHeroLayout(artwork: artwork)
+            if forceMapLayout, let artwork = visualImage {
+                // A map thumbnail is geographic content, not app artwork.
+                // Let it occupy the whole preview like a copied image.
+                mapHeroLayout(artwork: artwork)
+            } else if usesNativePreview, let artwork = visualImage {
+                nativeAppHeroLayout(artwork: artwork)
             } else {
-                // Unified clean fallback: same style for media and regular sites
+                // Link metadata is inconsistent: some sites expose an Open
+                // Graph image while others supply only an icon. Keep ordinary
+                // links in one stable favicon-and-text layout either way.
                 linkFallback
             }
         }
@@ -1207,28 +1216,53 @@ private struct LinkCardPreview: View {
             await loadMetadataIfNeeded()
         }
     }
-    
+
     @ViewBuilder
-    private func linkHeroLayout(artwork: NSImage) -> some View {
+    private func mapHeroLayout(artwork: NSImage) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            Image(nsImage: artwork)
+                .resizable()
+                .renderingMode(.original)
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fill)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.52)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+
+            Text(title ?? displayHost)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .shadow(color: .black.opacity(0.45), radius: 1, y: 1)
+                .padding(10)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
+
+    @ViewBuilder
+    private func nativeAppHeroLayout(artwork: NSImage) -> some View {
         VStack(spacing: 5) {
             Image(nsImage: artwork)
                 .resizable()
                 .renderingMode(.original)
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fill)
-                .frame(
-                    width: isVideoMediaLink ? 120 : 68,
-                    height: isVideoMediaLink ? 64 : 68
-                )
+                .frame(width: 68, height: 68)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            
+
             Text(title ?? displayHost)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(Theme.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity, alignment: .center)
+                .frame(maxWidth: .infinity)
                 .padding(.horizontal, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -1439,9 +1473,11 @@ struct MiniFileMockup: View {
                             .background(Color(hex: "#F1F1EF"))
                             .cornerRadius(3)
                     }
-                    Text(size)
-                        .font(.system(size: 9))
-                        .foregroundColor(Theme.textSecondary)
+                    if !size.isEmpty {
+                        Text(size)
+                            .font(.system(size: 9))
+                            .foregroundColor(Theme.textSecondary)
+                    }
                 }
             }
             Spacer()

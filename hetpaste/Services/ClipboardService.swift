@@ -201,10 +201,7 @@ final class ClipboardService: ObservableObject {
                 sourceAppName: appName,
                 sourceAppBundleID: bundleID,
                 appIconData: iconData,
-                syncStatus: .pending,
-                rtfData: snapshot.rtfData,
-                htmlData: snapshot.htmlData,
-                rtfdData: snapshot.rtfdData
+                syncStatus: .pending
             )
             if type == .text {
                 item.detectedLanguage = CodeLanguageDetector.detectLanguage(in: text)
@@ -232,13 +229,9 @@ final class ClipboardService: ObservableObject {
         let resolvedURL = (try? URL(resolvingAliasFileAt: inputURL, options: [])) ?? inputURL
         let resourceValues = try? resolvedURL.resourceValues(forKeys: [.isDirectoryKey])
         let isDirectory = resourceValues?.isDirectory == true
-        let url: URL
-        if isDirectory {
-            guard let archive = createPortableFolderArchive(from: resolvedURL) else { return nil }
-            url = archive
-        } else {
-            url = resolvedURL
-        }
+        // Preserve the exact Finder item the user copied. In particular, a
+        // folder is a folder, not an implicitly-created ZIP archive.
+        let url = resolvedURL
         // A file URL copied from Finder can carry a security-scoped grant when
         // the app is sandboxed. Hold that scope for the exact read/bookmark
         // operation, then persist the bookmark for later user actions.
@@ -246,18 +239,30 @@ final class ClipboardService: ObservableObject {
         defer {
             if didStartAccessing { url.stopAccessingSecurityScopedResource() }
         }
-        let ext = url.pathExtension.lowercased()
+        let ext = isDirectory ? "" : url.pathExtension.lowercased()
         let values = try? url.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
-        let utType = values?.contentType ?? UTType(filenameExtension: ext)
-        let mime = utType?.preferredMIMEType ?? "application/octet-stream"
+        let utType = isDirectory ? UTType.folder : (values?.contentType ?? UTType(filenameExtension: ext))
+        let mime = isDirectory ? "inode/directory" : (utType?.preferredMIMEType ?? "application/octet-stream")
         let type = classifyFileType(utType: utType, extension: ext, codeExtensions: Self.codeFileExtensions)
-        // Do not create a deceptively usable cloud card if the source cannot
-        // be read. A security bookmark remains for local Finder actions, but
-        // cross-device transfer requires real bytes.
-        guard let size = values?.fileSize.map({ Int64($0) }) ?? (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) else { return nil }
-        let data = size <= 48 * 1024 * 1024 ? try? Data(contentsOf: url) : nil
-        guard size > 48 * 1024 * 1024 || data != nil else { return nil }
-        let displayName = isDirectory ? "\(resolvedURL.lastPathComponent).zip" : url.lastPathComponent
+        let size: Int64
+        let data: Data?
+        if isDirectory {
+            // Keep the folder URL and name for local Finder behaviour, but
+            // retain an internal archive payload for iCloud transport.
+            // The archive is never presented as the copied item.
+            guard let archiveData = folderArchiveData(for: url) else { return nil }
+            size = Int64(archiveData.count)
+            data = archiveData
+        } else {
+            // Do not create a deceptively usable cloud card if a file cannot
+            // be read. A security bookmark remains for local Finder actions,
+            // but cross-device transfer requires real bytes.
+            guard let fileSize = values?.fileSize.map({ Int64($0) }) ?? (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) else { return nil }
+            size = fileSize
+            data = size <= 48 * 1024 * 1024 ? try? Data(contentsOf: url) : nil
+            guard size > 48 * 1024 * 1024 || data != nil else { return nil }
+        }
+        let displayName = url.lastPathComponent
         let item = ClipboardItem(
             contentType: type,
             contentText: displayName,
@@ -266,7 +271,7 @@ final class ClipboardService: ObservableObject {
             syncStatus: .pending,
             fileName: displayName,
             fileSize: size,
-            mimeType: isDirectory ? "application/zip" : mime,
+            mimeType: mime,
             originalFileURL: url,
             localData: data
         )
@@ -276,27 +281,25 @@ final class ClipboardService: ObservableObject {
         return item
     }
 
-    /// Folders are not a single portable pasteboard representation. Archive
-    /// them once at capture time so every device receives the same complete,
-    /// self-contained file instead of an unusable local directory reference.
-    private func createPortableFolderArchive(from directory: URL) -> URL? {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Sniphet-Folder-Archives", isDirectory: true)
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let archive = root.appendingPathComponent("\(UUID().uuidString)-\(directory.lastPathComponent)").appendingPathExtension("zip")
+    private func folderArchiveData(for directory: URL) -> Data? {
+        let archive = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hetpaste-folder-\(UUID().uuidString)")
+            .appendingPathExtension("zip")
+        defer { try? FileManager.default.removeItem(at: archive) }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", directory.path, archive.path]
         do {
             try process.run()
             process.waitUntilExit()
-            guard process.terminationStatus == 0,
-                  FileManager.default.fileExists(atPath: archive.path) else { return nil }
-            return archive
+            guard process.terminationStatus == 0 else { return nil }
+            return try? Data(contentsOf: archive)
         } catch {
             return nil
         }
     }
+
     private func captureRichTextFromSnapshot(
         _ snapshot: PasteboardSnapshot,
         plainText: String?,
@@ -402,9 +405,15 @@ final class ClipboardService: ObservableObject {
         let candidate = attributed.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !candidate.isEmpty else { return false }
         if let plainText,
-           candidate == plainText.trimmingCharacters(in: .whitespacesAndNewlines),
-           isSinglePlainLookingRun(attributed) {
-            return false
+           candidate == plainText.trimmingCharacters(in: .whitespacesAndNewlines) {
+            // Terminal and some editor pasteboards split a visually uniform
+            // selection into many RTF runs. A fixed-pitch font with one shared
+            // foreground/background palette is presentation chrome, not
+            // authored rich text. Keeping it made ordinary pasted text appear
+            // as selected text on a dark background in Snipy.
+            if isSinglePlainLookingRun(attributed) || isUniformMonospacedPresentation(attributed) {
+                return false
+            }
         }
         var score = 0
         var highConfidenceFormatting = false
@@ -419,6 +428,63 @@ final class ClipboardService: ObservableObject {
             }
         }
         return highConfidenceFormatting || score >= 2 || (runCount > 1 && score > 0)
+    }
+
+    private func isUniformMonospacedPresentation(_ attributed: NSAttributedString) -> Bool {
+        var referenceForeground: NSColor?
+        var referenceBackground: NSColor?
+        var sawFixedPitchFont = false
+        var isUniform = true
+
+        attributed.enumerateAttributes(in: NSRange(location: 0, length: attributed.length), options: []) { attributes, _, stop in
+            // These attributes convey actual document structure or styling and
+            // must always remain rich text, even in a monospaced font.
+            if attributes[.attachment] != nil || attributes[.link] != nil ||
+                attributes[.underlineStyle] != nil || attributes[.strikethroughStyle] != nil ||
+                attributes[.baselineOffset] != nil || attributes[.kern] != nil ||
+                attributes[.shadow] != nil || attributes[.strokeWidth] != nil ||
+                attributes[.strokeColor] != nil {
+                isUniform = false
+                stop.pointee = true
+                return
+            }
+
+            if let font = attributes[.font] as? NSFont {
+                let traits = NSFontManager.shared.traits(of: font)
+                guard font.isFixedPitch,
+                      !traits.contains(.boldFontMask),
+                      !traits.contains(.italicFontMask) else {
+                    isUniform = false
+                    stop.pointee = true
+                    return
+                }
+                sawFixedPitchFont = true
+            }
+
+            let foreground = attributes[.foregroundColor] as? NSColor
+            let background = attributes[.backgroundColor] as? NSColor
+            if let referenceForeground, !colorsMatch(referenceForeground, foreground) {
+                isUniform = false
+                stop.pointee = true
+                return
+            }
+            if let referenceBackground, !colorsMatch(referenceBackground, background) {
+                isUniform = false
+                stop.pointee = true
+                return
+            }
+            if referenceForeground == nil { referenceForeground = foreground }
+            if referenceBackground == nil { referenceBackground = background }
+        }
+        return isUniform && sawFixedPitchFont
+    }
+
+    private func colorsMatch(_ lhs: NSColor?, _ rhs: NSColor?) -> Bool {
+        switch (lhs?.usingColorSpace(.deviceRGB), rhs?.usingColorSpace(.deviceRGB)) {
+        case (nil, nil): return true
+        case let (lhs?, rhs?): return colorDistance(lhs, rhs) < 0.01
+        default: return false
+        }
     }
     private func isSinglePlainLookingRun(_ attributed: NSAttributedString) -> Bool {
         var runCount = 0
